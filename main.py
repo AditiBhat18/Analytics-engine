@@ -1,28 +1,53 @@
-from typing import Optional
-from fastapi import FastAPI, Depends
-from sqlmodel import Field, SQLModel, create_engine, Session
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from typing import List
+import json
 
-class Document(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    title: str
-    content: str
+app = FastAPI(title="Real-time Analytics Engine")
 
-DATABASE_URL = "postgresql://admin:supersecretpassword@localhost:5432/analytics_engine"
-engine = create_engine(DATABASE_URL)
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
 
-app = FastAPI(title="Collaborative Analytics Engine API")
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
 
-@app.on_event("startup")
-def on_startup():
-    SQLModel.metadata.create_all(engine)
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
-def get_session():
-    with Session(engine) as session:
-        yield session
+    async def broadcast_json(self, data: dict):
+        # Send structured JSON data to ALL connected users
+        for connection in self.active_connections:
+            await connection.send_json(data)
 
-@app.post("/documents/create")
-def create_document(doc: Document, session: Session = Depends(get_session)):
-    session.add(doc)
-    session.commit()
-    session.refresh(doc)
-    return doc
+manager = ConnectionManager()
+
+@app.get("/")
+def read_root():
+    return {"status": "Analytics Engine Online"}
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Receive incoming data formatted as JSON
+            data = await websocket.receive_json()
+            
+            # Print to server logs for debugging
+            print(f"Received Event: {data}")
+            
+            # Add server processing timestamp / metadata wrapper
+            payload = {
+                "event_type": data.get("type", "UNKNOWN_EVENT"),
+                "payload": data.get("payload", {}),
+                "status": "processed"
+            }
+            
+            # Broadcast structured payload to all connected clients
+            await manager.broadcast_json(payload)
+            
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        await manager.broadcast_json({"event_type": "USER_DISCONNECTED"})
