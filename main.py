@@ -1,308 +1,367 @@
+from datetime import datetime, timedelta
+import hashlib
+import hmac
 import json
+import os
 from typing import Optional
 from database import Base, engine, get_db
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.responses import HTMLResponse
-from models import AnalyticsEvent
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from models import AnalyticsEvent, DocumentPermission, User
 from pydantic import BaseModel
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-# Initialize database schema in PostgreSQL
+# Database Initialization
 Base.metadata.create_all(bind=engine)
 
+# Security Configuration
+SECRET_KEY = "SUPER_SECRET_JWT_KEY_CHANGE_THIS_IN_PRODUCTION"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 Hours
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
 app = FastAPI(
-    title="Real-Time Collaborative Workspace & Analytics Engine",
-    version="2.0",
+    title="Real-Time Collaborative Workspace with Auth & Permissions",
+    version="3.0",
 )
 
 
-# --- Connection Manager for Multi-Document WebSocket Streaming ---
+# --- Pure PBKDF2 Password Hashing ---
+def get_password_hash(password: str) -> str:
+    salt = os.urandom(16)
+    pwd_hash = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, 100000
+    )
+    return f"{salt.hex()}${pwd_hash.hex()}"
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        salt_hex, hash_hex = hashed_password.split("$")
+        salt = bytes.fromhex(salt_hex)
+        expected_hash = bytes.fromhex(hash_hex)
+        new_hash = hashlib.pbkdf2_hmac(
+            "sha256", plain_password.encode("utf-8"), salt, 100000
+        )
+        return hmac.compare_digest(new_hash, expected_hash)
+    except Exception:
+        return False
+
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user_from_token(
+    token: str, db: Session = Depends(get_db)
+) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+def check_doc_access(user_id: int, doc_name: str, db: Session) -> bool:
+    perm = (
+        db.query(DocumentPermission)
+        .filter(
+            DocumentPermission.doc_name == doc_name,
+            DocumentPermission.user_id == user_id,
+        )
+        .first()
+    )
+    return perm is not None
+
+
+# --- Connection Manager ---
 class ConnectionManager:
 
-  def __init__(self):
-    self.active_connections: dict[str, list[WebSocket]] = {}
+    def __init__(self):
+        self.active_connections: dict[str, list[WebSocket]] = {}
 
-  async def connect(self, doc_name: str, websocket: WebSocket):
-    await websocket.accept()
-    if doc_name not in self.active_connections:
-      self.active_connections[doc_name] = []
-    self.active_connections[doc_name].append(websocket)
+    async def connect(self, doc_name: str, websocket: WebSocket):
+        await websocket.accept()
+        if doc_name not in self.active_connections:
+            self.active_connections[doc_name] = []
+        self.active_connections[doc_name].append(websocket)
 
-  def disconnect(self, doc_name: str, websocket: WebSocket):
-    if (
-        doc_name in self.active_connections
-        and websocket in self.active_connections[doc_name]
-    ):
-      self.active_connections[doc_name].remove(websocket)
+    def disconnect(self, doc_name: str, websocket: WebSocket):
+        if (
+            doc_name in self.active_connections
+            and websocket in self.active_connections[doc_name]
+        ):
+            self.active_connections[doc_name].remove(websocket)
 
-  async def broadcast(self, doc_name: str, message: dict, sender: WebSocket):
-    if doc_name in self.active_connections:
-      for connection in self.active_connections[doc_name]:
-        if connection != sender:
-          await connection.send_json(message)
+    async def broadcast(self, doc_name: str, message: dict, sender: WebSocket):
+        if doc_name in self.active_connections:
+            for connection in self.active_connections[doc_name]:
+                if connection != sender:
+                    await connection.send_json(message)
 
-  def get_active_count(self, doc_name: str) -> int:
-    return len(self.active_connections.get(doc_name, []))
+    def get_active_count(self, doc_name: str) -> int:
+        return len(self.active_connections.get(doc_name, []))
 
 
 manager = ConnectionManager()
 
 
-# --- Pydantic Schemas for CRUD ---
+# --- Pydantic Schemas ---
+class AuthSchema(BaseModel):
+    email: str
+    password: str
+
+
+class ShareDocSchema(BaseModel):
+    doc_name: str
+    target_user_email: str
+
+
 class DocumentCreateSchema(BaseModel):
-  doc_name: str
-  content: Optional[str] = ""
+    doc_name: str
+    content: Optional[str] = ""
 
 
-class DocumentUpdateSchema(BaseModel):
-  content: str
-
-
-class RawEventUpdateSchema(BaseModel):
-  event_type: Optional[str] = None
-  payload: Optional[dict] = None
-
-
-# ---------------------------------------------------------
-# 1. UI ROUTE
-# ---------------------------------------------------------
+# --- UI Route ---
 @app.get("/", response_class=HTMLResponse)
 def get_ui():
-  with open("index.html", "r", encoding="utf-8") as f:
-    return f.read()
+    with open("index.html", "r", encoding="utf-8") as f:
+        return f.read()
 
 
 # ---------------------------------------------------------
-# 2. FILE MANAGEMENT & DOCUMENT CRUD ENDPOINTS
+# AUTHENTICATION ENDPOINTS (BOTH JSON BASED)
 # ---------------------------------------------------------
+@app.post("/api/auth/register")
+def register(user_data: AuthSchema, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == user_data.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    hashed_pwd = get_password_hash(user_data.password)
+    new_user = User(email=user_data.email, hashed_password=hashed_pwd)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {"message": "User created successfully", "email": new_user.email}
 
 
-# READ: Get all saved document names
+@app.post("/api/auth/login")
+def login(login_data: AuthSchema, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == login_data.email).first()
+    if not user:
+        raise HTTPException(
+            status_code=400, detail="Incorrect email or password"
+        )
+
+    is_valid = verify_password(login_data.password, user.hashed_password)
+
+    if not is_valid:
+        raise HTTPException(
+            status_code=400, detail="Incorrect email or password"
+        )
+
+    access_token = create_access_token(data={"sub": user.email})
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "email": user.email,
+    }
+
+
+# ---------------------------------------------------------
+# PROTECTED DOCUMENT & SHARING ENDPOINTS
+# ---------------------------------------------------------
 @app.get("/api/documents")
-def list_documents(db: Session = Depends(get_db)):
-  results = (
-      db.query(AnalyticsEvent.event_type)
-      .filter(AnalyticsEvent.event_type.like("DOC_%"))
-      .distinct()
-      .all()
-  )
-  doc_names = [r[0].replace("DOC_", "") for r in results]
-  if "default" not in doc_names:
-    doc_names.append("default")
-  return doc_names
+def list_user_documents(
+    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+):
+    user = get_current_user_from_token(token, db)
+    permissions = (
+        db.query(DocumentPermission)
+        .filter(DocumentPermission.user_id == user.id)
+        .all()
+    )
+    doc_names = [p.doc_name for p in permissions]
+    return doc_names
 
 
-# CREATE: Create a new document explicitly via REST
 @app.post("/api/documents")
-def create_document(doc: DocumentCreateSchema, db: Session = Depends(get_db)):
-  event_type = f"DOC_{doc.doc_name}"
-  db_event = AnalyticsEvent(event_type=event_type, payload=doc.content)
-  db.add(db_event)
-  db.commit()
-  return {
-      "message": f"Document '{doc.doc_name}' created successfully",
-      "doc_name": doc.doc_name,
-  }
-
-
-# READ: Get document content and real-time metrics
-@app.get("/api/documents/{doc_name}")
-def get_document(doc_name: str, db: Session = Depends(get_db)):
-  event = (
-      db.query(AnalyticsEvent)
-      .filter(AnalyticsEvent.event_type == f"DOC_{doc_name}")
-      .order_by(AnalyticsEvent.id.desc())
-      .first()
-  )
-  content = event.payload if event else ""
-  words = len(content.split()) if content else 0
-  chars = len(content)
-  lines = len(content.splitlines()) if content else 0
-
-  return {
-      "doc_name": doc_name,
-      "text": content,
-      "analytics": {"words": words, "chars": chars, "lines": lines},
-  }
-
-
-# UPDATE: Update document content explicitly via REST
-@app.put("/api/documents/{doc_name}")
-def update_document(
-    doc_name: str, doc_update: DocumentUpdateSchema, db: Session = Depends(get_db)
-):
-  event_type = f"DOC_{doc_name}"
-  db_event = AnalyticsEvent(event_type=event_type, payload=doc_update.content)
-  db.add(db_event)
-  db.commit()
-  return {
-      "message": f"Document '{doc_name}' updated successfully",
-      "doc_name": doc_name,
-  }
-
-
-# DELETE: Delete document and all historical revisions
-@app.delete("/api/documents/{doc_name}")
-def delete_document(doc_name: str, db: Session = Depends(get_db)):
-  event_type = f"DOC_{doc_name}"
-  records = (
-      db.query(AnalyticsEvent)
-      .filter(AnalyticsEvent.event_type == event_type)
-      .all()
-  )
-  if not records:
-    raise HTTPException(status_code=404, detail="Document not found")
-
-  for record in records:
-    db.delete(record)
-  db.commit()
-  return {
-      "message": (
-          f"Document '{doc_name}' and its analytics history deleted successfully"
-      )
-  }
-
-
-# ---------------------------------------------------------
-# 3. GLOBAL ANALYTICS ENDPOINTS
-# ---------------------------------------------------------
-
-
-# Summary Analytics: Total system events and active documents
-@app.get("/api/analytics/summary")
-def get_analytics_summary(db: Session = Depends(get_db)):
-  total_events = db.query(func.count(AnalyticsEvent.id)).scalar() or 0
-  unique_types = (
-      db.query(func.count(func.distinct(AnalyticsEvent.event_type))).scalar()
-      or 0
-  )
-  return {
-      "total_events_logged": total_events,
-      "unique_event_types": unique_types,
-  }
-
-
-# Event Distribution Analytics
-@app.get("/api/analytics/event-types")
-def get_event_type_distribution(
-    limit: int = 10, db: Session = Depends(get_db)
-):
-  results = (
-      db.query(
-          AnalyticsEvent.event_type, func.count(AnalyticsEvent.id).label("count")
-      )
-      .group_by(AnalyticsEvent.event_type)
-      .order_by(func.count(AnalyticsEvent.id).desc())
-      .limit(limit)
-      .all()
-  )
-  return [
-      {"event_type": event_type, "count": count} for event_type, count in results
-  ]
-
-
-# ---------------------------------------------------------
-# 4. RAW DATABASE RECORD CRUD (For System Admin / Testing)
-# ---------------------------------------------------------
-
-
-# READ: View raw audit log events
-@app.get("/api/events")
-def get_all_raw_events(limit: int = 50, db: Session = Depends(get_db)):
-  return (
-      db.query(AnalyticsEvent)
-      .order_by(AnalyticsEvent.id.desc())
-      .limit(limit)
-      .all()
-  )
-
-
-# UPDATE: Modify raw log record by ID
-@app.put("/api/events/{event_id}")
-def update_raw_event(
-    event_id: int,
-    event_update: RawEventUpdateSchema,
+def create_document(
+    doc: DocumentCreateSchema,
+    token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ):
-  event = (
-      db.query(AnalyticsEvent).filter(AnalyticsEvent.id == event_id).first()
-  )
-  if not event:
-    raise HTTPException(status_code=404, detail="Event log not found")
+    user = get_current_user_from_token(token, db)
 
-  if event_update.event_type:
-    event.event_type = event_update.event_type
-  if event_update.payload is not None:
-    event.payload = json.dumps(event_update.payload)
+    perm = DocumentPermission(doc_name=doc.doc_name, user_id=user.id)
+    db.add(perm)
 
-  db.commit()
-  db.refresh(event)
-  return event
+    event_type = f"DOC_{doc.doc_name}"
+    db_event = AnalyticsEvent(event_type=event_type, payload=doc.content)
+    db.add(db_event)
+
+    db.commit()
+    return {
+        "message": f"Document '{doc.doc_name}' created",
+        "doc_name": doc.doc_name,
+    }
 
 
-# DELETE: Wipe raw event log by ID
-@app.delete("/api/events/{event_id}")
-def delete_raw_event(event_id: int, db: Session = Depends(get_db)):
-  event = (
-      db.query(AnalyticsEvent).filter(AnalyticsEvent.id == event_id).first()
-  )
-  if not event:
-    raise HTTPException(status_code=404, detail="Event log not found")
+@app.get("/api/documents/{doc_name}")
+def get_document(
+    doc_name: str,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    user = get_current_user_from_token(token, db)
+    if not check_doc_access(user.id, doc_name, db):
+        raise HTTPException(
+            status_code=403, detail="Access denied to this private document"
+        )
 
-  db.delete(event)
-  db.commit()
-  return {"message": f"Raw event {event_id} wiped from PostgreSQL"}
+    event = (
+        db.query(AnalyticsEvent)
+        .filter(AnalyticsEvent.event_type == f"DOC_{doc_name}")
+        .order_by(AnalyticsEvent.id.desc())
+        .first()
+    )
+    content = event.payload if event else ""
+    words = len(content.split()) if content else 0
+    chars = len(content)
+    lines = len(content.splitlines()) if content else 0
+
+    return {
+        "doc_name": doc_name,
+        "text": content,
+        "analytics": {"words": words, "chars": chars, "lines": lines},
+    }
+
+
+@app.post("/api/documents/share")
+def share_document(
+    share_data: ShareDocSchema,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    current_user = get_current_user_from_token(token, db)
+
+    if not check_doc_access(current_user.id, share_data.doc_name, db):
+        raise HTTPException(
+            status_code=403, detail="You do not have permission to share this file"
+        )
+
+    target_user = (
+        db.query(User).filter(User.email == share_data.target_user_email).first()
+    )
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user email not found")
+
+    existing_perm = (
+        db.query(DocumentPermission)
+        .filter(
+            DocumentPermission.doc_name == share_data.doc_name,
+            DocumentPermission.user_id == target_user.id,
+        )
+        .first()
+    )
+    if not existing_perm:
+        new_perm = DocumentPermission(
+            doc_name=share_data.doc_name, user_id=target_user.id
+        )
+        db.add(new_perm)
+        db.commit()
+
+    return {
+        "message": (
+            f"Document '{share_data.doc_name}' shared with"
+            f" {share_data.target_user_email}"
+        )
+    }
 
 
 # ---------------------------------------------------------
-# 5. REAL-TIME WEBSOCKET STREAMING ENGINE
+# PROTECTED WEBSOCKET CHANNEL
 # ---------------------------------------------------------
 @app.websocket("/ws/{doc_name}")
 async def websocket_endpoint(
-    websocket: WebSocket, doc_name: str, db: Session = Depends(get_db)
+    websocket: WebSocket,
+    doc_name: str,
+    token: str = Query(...),
+    db: Session = Depends(get_db),
 ):
-  await manager.connect(doc_name, websocket)
+    try:
+        user = get_current_user_from_token(token, db)
+    except HTTPException:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
 
-  # Notify all connected tabs of updated active user count
-  await manager.broadcast(
-      doc_name,
-      {"type": "USER_COUNT", "count": manager.get_active_count(doc_name)},
-      sender=None,
-  )
+    if not check_doc_access(user.id, doc_name, db):
+        await websocket.close(code=4003, reason="Access Denied")
+        return
 
-  try:
-    while True:
-      data = await websocket.receive_json()
-      content = data.get("text", "")
-
-      # Calculate Real-Time Document Analytics
-      words = len(content.split()) if content else 0
-      chars = len(content)
-      lines = len(content.splitlines()) if content else 0
-
-      # Persist state into PostgreSQL
-      db_event = AnalyticsEvent(
-          event_type=f"DOC_{doc_name}", payload=content
-      )
-      db.add(db_event)
-      db.commit()
-
-      # Broadcast live text change and analytics to all concurrent collaborators
-      await manager.broadcast(
-          doc_name,
-          {
-              "type": "TEXT_UPDATE",
-              "text": content,
-              "analytics": {"words": words, "chars": chars, "lines": lines},
-          },
-          sender=websocket,
-      )
-
-  except WebSocketDisconnect:
-    manager.disconnect(doc_name, websocket)
+    await manager.connect(doc_name, websocket)
     await manager.broadcast(
         doc_name,
         {"type": "USER_COUNT", "count": manager.get_active_count(doc_name)},
         sender=None,
     )
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            content = data.get("text", "")
+
+            words = len(content.split()) if content else 0
+            chars = len(content)
+            lines = len(content.splitlines()) if content else 0
+
+            db_event = AnalyticsEvent(
+                event_type=f"DOC_{doc_name}", payload=content
+            )
+            db.add(db_event)
+            db.commit()
+
+            await manager.broadcast(
+                doc_name,
+                {
+                    "type": "TEXT_UPDATE",
+                    "text": content,
+                    "analytics": {"words": words, "chars": chars, "lines": lines},
+                },
+                sender=websocket,
+            )
+
+    except WebSocketDisconnect:
+        manager.disconnect(doc_name, websocket)
+        await manager.broadcast(
+            doc_name,
+            {"type": "USER_COUNT", "count": manager.get_active_count(doc_name)},
+            sender=None,
+        )
