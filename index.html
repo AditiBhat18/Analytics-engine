@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Collaborative Workspace & Real-time Analytics Engine</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; background-color: #f4f6f9; color: #333; }
+        
+        /* Sidebar Controls */
+        .sidebar { width: 280px; background-color: #1e293b; color: white; padding: 20px; display: flex; flex-direction: column; justify-content: space-between; }
+        .sidebar-top h2 { font-size: 16px; margin-top: 0; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #334155; padding-bottom: 10px; }
+        .file-list { list-style: none; padding: 0; margin: 0; max-height: 40vh; overflow-y: auto; }
+        .file-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; margin-bottom: 6px; background-color: #334155; border-radius: 6px; cursor: pointer; transition: 0.2s; font-size: 14px; }
+        .file-item:hover, .file-item.active { background-color: #2563eb; }
+        .delete-btn { color: #f87171; font-weight: bold; padding: 2px 6px; border-radius: 4px; }
+        .delete-btn:hover { background: #7f1d1d; }
+
+        .new-file-box { display: flex; gap: 8px; margin-top: 15px; }
+        .new-file-box input { flex: 1; padding: 8px; border-radius: 4px; border: 1px solid #475569; background: #0f172a; color: white; outline: none; }
+        .new-file-box button { padding: 8px 12px; background: #10b981; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+
+        .docs-link-btn { display: block; width: 100%; text-align: center; background: #8b5cf6; color: white; text-decoration: none; padding: 10px; border-radius: 6px; font-weight: bold; font-size: 13px; margin-top: 15px; }
+        .docs-link-btn:hover { background: #7c3aed; }
+
+        /* Main Workspace Area */
+        .main { flex: 1; display: flex; flex-direction: column; padding: 25px; overflow: hidden; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .doc-title { font-size: 24px; font-weight: bold; color: #0f172a; margin: 0; }
+
+        /* Analytics Metric Cards */
+        .analytics-grid { display: flex; gap: 15px; margin-bottom: 15px; }
+        .card { background: white; padding: 12px 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); flex: 1; text-align: center; border: 1px solid #e2e8f0; }
+        .card h4 { margin: 0; color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .card p { margin: 4px 0 0; font-size: 22px; font-weight: bold; color: #0f172a; }
+
+        /* Document Editor Area */
+        textarea { flex: 1; width: 100%; padding: 20px; border: 2px solid #cbd5e1; border-radius: 8px; font-size: 16px; font-family: 'Courier New', Courier, monospace; outline: none; resize: none; background: white; box-shadow: inset 0 2px 4px rgba(0,0,0,0.02); line-height: 1.5; }
+        textarea:focus { border-color: #2563eb; }
+
+        /* Real-Time Database Event Feed */
+        .log-box { height: 110px; background: #0f172a; color: #38bdf8; font-family: monospace; padding: 12px; border-radius: 6px; margin-top: 15px; overflow-y: auto; font-size: 12px; border-left: 4px solid #3b82f6; }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar: File System & Navigation -->
+    <div class="sidebar">
+        <div class="sidebar-top">
+            <h2>📁 Saved Documents</h2>
+            <ul class="file-list" id="fileList"></ul>
+            
+            <div class="new-file-box">
+                <input type="text" id="newDocName" placeholder="New document name...">
+                <button onclick="createNewDoc()">+</button>
+            </div>
+        </div>
+
+        <div>
+            <a href="/docs" target="_blank" class="docs-link-btn">
+                ⚙️ Open Swagger CRUD & API Docs ↗
+            </a>
+        </div>
+    </div>
+
+    <!-- Main Editor & Real-time Analytics Dashboard -->
+    <div class="main">
+        <div class="header">
+            <h1 class="doc-title" id="currentDocTitle">Doc: default</h1>
+            <span id="saveBadge" style="background: #10b981; color: white; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: bold;">Saved in PostgreSQL</span>
+        </div>
+
+        <!-- Real-Time Document & Event Aggregation Metrics -->
+        <div class="analytics-grid">
+            <div class="card"><h4>Words</h4><p id="statWords">0</p></div>
+            <div class="card"><h4>Characters</h4><p id="statChars">0</p></div>
+            <div class="card"><h4>Lines</h4><p id="statLines">0</p></div>
+            <div class="card"><h4>Active Collaborators</h4><p id="statUsers" style="color: #2563eb;">1</p></div>
+            <div class="card"><h4>Total Logged Events</h4><p id="statTotalEvents" style="color: #8b5cf6;">0</p></div>
+        </div>
+
+        <!-- Zero-Click Collaborative Editor -->
+        <textarea id="editor" placeholder="Start typing... Changes sync in real-time over WebSockets and store in Docker PostgreSQL."></textarea>
+
+        <!-- Live Activity Audit Log -->
+        <div class="log-box" id="logBox">
+            > Workspace initialized. Connected to PostgreSQL analytics engine.<br>
+        </div>
+    </div>
+
+    <script>
+        let currentDoc = "default";
+        let ws = null;
+
+        const editor = document.getElementById("editor");
+        const logBox = document.getElementById("logBox");
+
+        function log(msg) {
+            logBox.innerHTML += `> ${new Date().toLocaleTimeString()} - ${msg}<br>`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // 1. READ: Fetch Saved File List
+        async function fetchFileList() {
+            const res = await fetch('/api/documents');
+            const files = await res.json();
+            const list = document.getElementById("fileList");
+            list.innerHTML = "";
+            files.forEach(file => {
+                const li = document.createElement("li");
+                li.className = `file-item ${file === currentDoc ? 'active' : ''}`;
+                li.onclick = () => switchDoc(file);
+                
+                const titleSpan = document.createElement("span");
+                titleSpan.innerText = `📄 ${file}`;
+                li.appendChild(titleSpan);
+
+                if (file !== "default") {
+                    const delSpan = document.createElement("span");
+                    delSpan.className = "delete-btn";
+                    delSpan.innerText = "✖";
+                    delSpan.title = "Delete document";
+                    delSpan.onclick = (e) => {
+                        e.stopPropagation();
+                        deleteDoc(file);
+                    };
+                    li.appendChild(delSpan);
+                }
+
+                list.appendChild(li);
+            });
+            refreshGlobalAnalytics();
+        }
+
+        // 2. READ: Load Selected Document
+        async function switchDoc(docName) {
+            currentDoc = docName;
+            document.getElementById("currentDocTitle").innerText = `Doc: ${docName}`;
+            fetchFileList();
+
+            const res = await fetch(`/api/documents/${docName}`);
+            const data = await res.json();
+            editor.value = data.text || "";
+            
+            document.getElementById("statWords").innerText = data.analytics.words;
+            document.getElementById("statChars").innerText = data.analytics.chars;
+            document.getElementById("statLines").innerText = data.analytics.lines;
+
+            log(`Loaded document '${docName}' from PostgreSQL.`);
+            connectWebSocket();
+        }
+
+        // 3. CREATE: Add New Document
+        async function createNewDoc() {
+            const nameInput = document.getElementById("newDocName");
+            const name = nameInput.value.trim().replace(/\s+/g, '_');
+            if (name) {
+                await fetch('/api/documents', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ doc_name: name, content: "" })
+                });
+                nameInput.value = "";
+                switchDoc(name);
+            }
+        }
+
+        // 4. DELETE: Remove Document via REST API
+        async function deleteDoc(docName) {
+            if (confirm(`Are you sure you want to delete document '${docName}'?`)) {
+                await fetch(`/api/documents/${docName}`, { method: 'DELETE' });
+                log(`Deleted document '${docName}'.`);
+                switchDoc("default");
+            }
+        }
+
+        // Fetch Global System Analytics Metrics
+        async function refreshGlobalAnalytics() {
+            try {
+                const res = await fetch('/api/analytics/summary');
+                const data = await res.json();
+                document.getElementById("statTotalEvents").innerText = data.total_events_logged;
+            } catch(e) {}
+        }
+
+        // WebSocket Streaming & Multi-User Broadcast
+        function connectWebSocket() {
+            if (ws) ws.close();
+
+            const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+            ws = new WebSocket(`${protocol}${window.location.host}/ws/${currentDoc}`);
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                
+                if (data.type === "TEXT_UPDATE") {
+                    const start = editor.selectionStart;
+                    const end = editor.selectionEnd;
+                    editor.value = data.text;
+                    editor.setSelectionRange(start, end);
+
+                    document.getElementById("statWords").innerText = data.analytics.words;
+                    document.getElementById("statChars").innerText = data.analytics.chars;
+                    document.getElementById("statLines").innerText = data.analytics.lines;
+                    refreshGlobalAnalytics();
+                    log(`Live WebSocket edit received on '${currentDoc}'.`);
+                } else if (data.type === "USER_COUNT") {
+                    document.getElementById("statUsers").innerText = data.count;
+                    log(`Active collaborators on document: ${data.count}`);
+                }
+            };
+        }
+
+        // Local Input Listener (Triggers WebSocket Stream & Sync)
+        editor.addEventListener("input", () => {
+            const val = editor.value;
+            document.getElementById("statWords").innerText = val.trim() ? val.trim().split(/\s+/).length : 0;
+            document.getElementById("statChars").innerText = val.length;
+            document.getElementById("statLines").innerText = val ? val.split('\n').length : 0;
+
+            document.getElementById("saveBadge").innerText = "Saving to DB...";
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ text: val }));
+            }
+
+            setTimeout(() => {
+                document.getElementById("saveBadge").innerText = "Saved in PostgreSQL";
+                refreshGlobalAnalytics();
+            }, 300);
+        });
+
+        // Initial Boot
+        fetchFileList();
+        switchDoc("default");
+    </script>
+</body>
+</html>
