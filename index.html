@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!-- <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -267,6 +267,440 @@
                     showToast("Failed to create document");
                 }
             } catch (err) { showToast("Failed to create document"); }
+        }
+
+        async function selectDocument(docName) {
+            currentDoc = docName;
+            document.getElementById("currentDocTitle").innerText = docName;
+            document.getElementById("editor").disabled = false;
+            await loadDocumentList();
+
+            try {
+                const res = await fetch(`/api/documents/${docName}`, {
+                    headers: { "Authorization": `Bearer ${token}` }
+                });
+                const data = await res.json();
+                document.getElementById("editor").value = data.text || "";
+                updateAnalyticsUI(data.analytics);
+            } catch (err) { console.error("Failed content fetch", err); }
+
+            connectWebSocket(docName);
+        }
+
+        async function shareDocument() {
+            if (!currentDoc) return showToast("Select a document first.");
+            const targetEmail = await showPrompt(`Share '${currentDoc}' with email:`);
+            if (!targetEmail) return;
+
+            try {
+                const res = await fetch("/api/documents/share", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ doc_name: currentDoc, target_user_email: targetEmail })
+                });
+                const data = await res.json();
+                showToast(res.ok ? data.message : data.detail);
+            } catch (err) { showToast("Sharing failed."); }
+        }
+
+        function connectWebSocket(docName) {
+            if (ws) ws.close();
+            const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws/${docName}?token=${token}`);
+
+            ws.onopen = () => {
+                document.getElementById("statusDot").classList.add("connected");
+                document.getElementById("statusText").innerText = "Connected";
+            };
+            ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                if (message.type === "TEXT_UPDATE") {
+                    document.getElementById("editor").value = message.text;
+                    updateAnalyticsUI(message.analytics);
+                } else if (message.type === "USER_COUNT") {
+                    document.getElementById("activeUsers").innerText = message.count;
+                }
+            };
+            ws.onclose = () => {
+                document.getElementById("statusDot").classList.remove("connected");
+                document.getElementById("statusText").innerText = "Disconnected";
+            };
+        }
+
+        document.getElementById("editor").addEventListener("input", (e) => {
+            const text = e.target.value;
+            updateAnalyticsUI(computeAnalytics(text));
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ text: text }));
+            }
+        });
+
+        function computeAnalytics(text) {
+            return {
+                words: text ? text.split(/\s+/).filter(Boolean).length : 0,
+                chars: text.length,
+                lines: text ? text.split("\n").length : 0
+            };
+        }
+
+        function updateAnalyticsUI(analytics) {
+            if (!analytics) return;
+            document.getElementById("wordCount").innerText = analytics.words || 0;
+            document.getElementById("charCount").innerText = analytics.chars || 0;
+            document.getElementById("lineCount").innerText = analytics.lines || 0;
+        }
+    </script>
+</body>
+</html> -->
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Collaborative Workspace</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-color: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-color: #38bdf8;
+            --accent-hover: #0284c7;
+            --danger-color: #ef4444;
+            --border-color: #334155;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-color); min-height: 100vh; display: flex; flex-direction: column; }
+        header { background-color: var(--card-bg); border-bottom: 1px solid var(--border-color); padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
+        .user-badge { font-size: 0.9rem; color: var(--text-muted); display: flex; align-items: center; gap: 1rem; }
+        .container { display: grid; grid-template-columns: 280px 1fr; flex: 1; height: calc(100vh - 65px); }
+        sidebar { background-color: var(--card-bg); border-right: 1px solid var(--border-color); padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
+        .doc-list { list-style: none; display: flex; flex-direction: column; gap: 0.5rem; overflow-y: auto; }
+        .doc-item { padding: 0.75rem 1rem; border-radius: 6px; background: #0f172a50; cursor: pointer; border: 1px solid transparent; transition: all 0.2s; }
+        .doc-item:hover, .doc-item.active { border-color: var(--accent-color); background: #0f172a; }
+        main { padding: 2rem; display: flex; flex-direction: column; gap: 1.5rem; }
+        .toolbar { display: flex; justify-content: space-between; align-items: center; background-color: var(--card-bg); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color); }
+        .analytics-bar { display: flex; gap: 1.5rem; font-size: 0.85rem; color: var(--text-muted); }
+        .analytics-bar span strong { color: var(--accent-color); }
+        textarea { flex: 1; width: 100%; background-color: var(--card-bg); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 8px; padding: 1.5rem; font-size: 1rem; line-height: 1.6; resize: none; outline: none; }
+        textarea:focus { border-color: var(--accent-color); }
+        .auth-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.95); display: flex; justify-content: center; align-items: center; z-index: 100; }
+        .auth-card { background-color: var(--card-bg); padding: 2.5rem; border-radius: 12px; border: 1px solid var(--border-color); width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 1.25rem; }
+        input { background: var(--bg-color); border: 1px solid var(--border-color); padding: 0.75rem 1rem; border-radius: 6px; color: var(--text-color); font-size: 0.95rem; outline: none; }
+        input:focus { border-color: var(--accent-color); }
+        button { background-color: var(--accent-color); color: #000; font-weight: 600; border: none; padding: 0.75rem 1rem; border-radius: 6px; cursor: pointer; transition: background 0.2s; }
+        button:hover { background-color: var(--accent-hover); color: #fff; }
+        button.btn-secondary { background: transparent; color: var(--text-muted); border: 1px solid var(--border-color); }
+        button.btn-secondary:hover { background: var(--border-color); color: var(--text-color); }
+        .status-pill { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; padding: 0.25rem 0.75rem; border-radius: 9999px; background: #0f172a; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger-color); }
+        .status-dot.connected { background: #22c55e; }
+        .hidden { display: none !important; }
+        .prompt-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.85); display: flex; justify-content: center; align-items: center; z-index: 200; }
+        .prompt-card { background-color: var(--card-bg); padding: 2rem; border-radius: 12px; border: 1px solid var(--border-color); width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 1rem; }
+        .prompt-actions { display: flex; gap: 0.75rem; justify-content: flex-end; }
+        .prompt-actions button { padding: 0.6rem 1.1rem; }
+        #toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); background: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.75rem 1.25rem; border-radius: 8px; font-size: 0.9rem; z-index: 300; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+        .doc-item { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+        .doc-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .doc-delete-btn { background: transparent; border: none; color: var(--text-muted); padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.9rem; line-height: 1; cursor: pointer; }
+        .doc-delete-btn:hover { background: var(--danger-color); color: #fff; }
+    </style>
+</head>
+<body>
+
+    <div id="authModal" class="auth-overlay">
+        <div class="auth-card">
+            <h2 id="authTitle">Login</h2>
+            <input type="email" id="authEmail" placeholder="Email Address" required>
+            <input type="password" id="authPassword" placeholder="Password" required>
+            <button id="authPrimaryBtn" onclick="handleAuthSubmit()">Login</button>
+            <button class="btn-secondary" id="authToggleBtn" onclick="toggleAuthMode()">Need an account? Register</button>
+            <p id="authError" style="color: var(--danger-color); font-size: 0.85rem; display: none;"></p>
+        </div>
+    </div>
+
+    <div id="promptOverlay" class="prompt-overlay hidden">
+        <div class="prompt-card">
+            <h3 id="promptTitle">Enter value</h3>
+            <input type="text" id="promptInput" placeholder="">
+            <div class="prompt-actions">
+                <button class="btn-secondary" onclick="closePrompt(null)">Cancel</button>
+                <button onclick="closePrompt(document.getElementById('promptInput').value)">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="confirmOverlay" class="prompt-overlay hidden">
+        <div class="prompt-card">
+            <h3 id="confirmTitle">Are you sure?</h3>
+            <div class="prompt-actions">
+                <button class="btn-secondary" onclick="closeConfirm(false)">Cancel</button>
+                <button onclick="closeConfirm(true)" style="background-color: var(--danger-color);">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="hidden"></div>
+
+    <header>
+        <h2>Workspace Realtime</h2>
+        <div class="user-badge">
+            <span id="userEmailDisplay">Not logged in</span>
+            <button class="btn-secondary" onclick="logout()" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;">Logout</button>
+        </div>
+    </header>
+
+    <div class="container">
+        <sidebar>
+            <button onclick="createNewDocument()">+ New Document</button>
+            <h4 style="color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase;">Your Documents</h4>
+            <ul class="doc-list" id="documentList"></ul>
+        </sidebar>
+
+        <main>
+            <div class="toolbar">
+                <div>
+                    <h3 id="currentDocTitle">Select a document</h3>
+                    <div class="status-pill" style="margin-top: 0.25rem;">
+                        <span id="statusDot" class="status-dot"></span>
+                        <span id="statusText">Disconnected</span>
+                    </div>
+                </div>
+
+                <div class="analytics-bar">
+                    <span>Active Users: <strong id="activeUsers">0</strong></span>
+                    <span>Words: <strong id="wordCount">0</strong></span>
+                    <span>Chars: <strong id="charCount">0</strong></span>
+                    <span>Lines: <strong id="lineCount">0</strong></span>
+                </div>
+
+                <button class="btn-secondary" onclick="shareDocument()">Share Doc</button>
+            </div>
+
+            <textarea id="editor" placeholder="Select or create a document to start editing..." disabled></textarea>
+        </main>
+    </div>
+
+    <script>
+        let token = localStorage.getItem("jwt_token");
+        let currentUser = localStorage.getItem("user_email");
+        let currentDoc = null;
+        let ws = null;
+        let isRegisterMode = false;
+        let promptResolve = null;
+
+        function showPrompt(title) {
+            return new Promise((resolve) => {
+                promptResolve = resolve;
+                document.getElementById("promptTitle").innerText = title;
+                const input = document.getElementById("promptInput");
+                input.value = "";
+                document.getElementById("promptOverlay").classList.remove("hidden");
+                input.focus();
+            });
+        }
+
+        function closePrompt(value) {
+            document.getElementById("promptOverlay").classList.add("hidden");
+            if (promptResolve) {
+                promptResolve(value && value.trim() ? value.trim() : null);
+                promptResolve = null;
+            }
+        }
+
+        document.getElementById("promptInput").addEventListener("keydown", (e) => {
+            if (e.key === "Enter") closePrompt(document.getElementById("promptInput").value);
+            if (e.key === "Escape") closePrompt(null);
+        });
+
+        let toastTimer = null;
+        function showToast(message) {
+            const toast = document.getElementById("toast");
+            toast.innerText = message;
+            toast.classList.remove("hidden");
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toast.classList.add("hidden"), 3000);
+        }
+
+        let confirmResolve = null;
+        function showConfirm(message) {
+            return new Promise((resolve) => {
+                confirmResolve = resolve;
+                document.getElementById("confirmTitle").innerText = message;
+                document.getElementById("confirmOverlay").classList.remove("hidden");
+            });
+        }
+
+        function closeConfirm(value) {
+            document.getElementById("confirmOverlay").classList.add("hidden");
+            if (confirmResolve) {
+                confirmResolve(value);
+                confirmResolve = null;
+            }
+        }
+
+        window.onload = () => {
+            if (token && currentUser) {
+                hideAuthModal();
+                loadDocumentList();
+            } else {
+                showAuthModal();
+            }
+        };
+
+        function toggleAuthMode() {
+            isRegisterMode = !isRegisterMode;
+            document.getElementById("authTitle").innerText = isRegisterMode ? "Register" : "Login";
+            document.getElementById("authPrimaryBtn").innerText = isRegisterMode ? "Register" : "Login";
+            document.getElementById("authToggleBtn").innerText = isRegisterMode ? "Have an account? Login" : "Need an account? Register";
+            document.getElementById("authError").style.display = "none";
+        }
+
+        async function handleAuthSubmit() {
+            const email = document.getElementById("authEmail").value.trim();
+            const password = document.getElementById("authPassword").value;
+            const errorElem = document.getElementById("authError");
+            errorElem.style.display = "none";
+
+            if (!email || !password) {
+                errorElem.innerText = "Email and password are required.";
+                errorElem.style.display = "block";
+                return;
+            }
+
+            const endpoint = isRegisterMode ? "/api/auth/register" : "/api/auth/login";
+
+            try {
+                const res = await fetch(endpoint, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ email: email, password: password })
+                });
+                
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.detail || "Authentication failed");
+                }
+
+                if (isRegisterMode) {
+                    showToast("Account registered successfully! Now click Login.");
+                    toggleAuthMode();
+                } else {
+                    token = data.access_token;
+                    currentUser = data.email;
+                    localStorage.setItem("jwt_token", token);
+                    localStorage.setItem("user_email", currentUser);
+
+                    hideAuthModal();
+                    loadDocumentList();
+                }
+            } catch (err) {
+                errorElem.innerText = err.message;
+                errorElem.style.display = "block";
+            }
+        }
+
+        function showAuthModal() { document.getElementById("authModal").classList.remove("hidden"); }
+        function hideAuthModal() {
+            document.getElementById("authModal").classList.add("hidden");
+            document.getElementById("userEmailDisplay").innerText = currentUser;
+        }
+
+        function logout() {
+            localStorage.clear();
+            if (ws) ws.close();
+            location.reload();
+        }
+
+        async function loadDocumentList() {
+            try {
+                const res = await fetch("/api/documents", {
+                    headers: { "Authorization": `Bearer ${token}` }
+                });
+                const docs = await res.json();
+                const list = document.getElementById("documentList");
+                list.innerHTML = "";
+                docs.forEach(doc => {
+                    const li = document.createElement("li");
+                    li.className = `doc-item ${doc === currentDoc ? 'active' : ''}`;
+
+                    const nameSpan = document.createElement("span");
+                    nameSpan.className = "doc-item-name";
+                    nameSpan.innerText = doc;
+                    nameSpan.onclick = () => selectDocument(doc);
+
+                    const deleteBtn = document.createElement("button");
+                    deleteBtn.className = "doc-delete-btn";
+                    deleteBtn.innerText = "✕";
+                    deleteBtn.title = "Delete document";
+                    deleteBtn.onclick = (ev) => {
+                        ev.stopPropagation();
+                        deleteDocument(doc);
+                    };
+
+                    li.appendChild(nameSpan);
+                    li.appendChild(deleteBtn);
+                    list.appendChild(li);
+                });
+            } catch (err) { console.error("Failed to load docs", err); }
+        }
+
+        async function createNewDocument() {
+            const docName = await showPrompt("Enter new document name:");
+            if (!docName) return;
+
+            try {
+                const res = await fetch("/api/documents", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ doc_name: docName, content: "" })
+                });
+                if (res.ok) {
+                    await loadDocumentList();
+                    selectDocument(docName);
+                } else {
+                    showToast("Failed to create document");
+                }
+            } catch (err) { showToast("Failed to create document"); }
+        }
+
+        async function deleteDocument(docName) {
+            const confirmed = await showConfirm(`Delete document '${docName}'? This cannot be undone.`);
+            if (!confirmed) return;
+
+            try {
+                const res = await fetch(`/api/documents/${docName}`, {
+                    method: "DELETE",
+                    headers: { "Authorization": `Bearer ${token}` }
+                });
+                const data = await res.json();
+
+                if (res.ok) {
+                    if (currentDoc === docName) {
+                        currentDoc = null;
+                        if (ws) ws.close();
+                        document.getElementById("currentDocTitle").innerText = "Select a document";
+                        document.getElementById("editor").value = "";
+                        document.getElementById("editor").disabled = true;
+                        updateAnalyticsUI({ words: 0, chars: 0, lines: 0 });
+                    }
+                    await loadDocumentList();
+                    showToast(data.message || "Document deleted");
+                } else {
+                    showToast(data.detail || "Failed to delete document");
+                }
+            } catch (err) { showToast("Failed to delete document"); }
         }
 
         async function selectDocument(docName) {
