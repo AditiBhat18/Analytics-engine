@@ -45,8 +45,8 @@ Early in development, documents were identified only by their display name. This
 
 ### 1. Clone the repo
 ```bash
-git clone https://github.com/<your-username>/<your-repo-name>.git
-cd <your-repo-name>
+git clone https://github.com/AditiBhat18/Analytics-engine.git
+cd Analytics-engine
 ```
 
 ### 2. Start the database
@@ -88,7 +88,3 @@ To test real-time multi-user collaboration: open a second tab (or an incognito/p
 - Rich text formatting instead of plain text
 - Document version history / rollback
 - Rate limiting on auth endpoints
-
-## License
-
-MIT — feel free to use this as a learning reference.
