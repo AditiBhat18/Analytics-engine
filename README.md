@@ -37,7 +37,10 @@ A full-stack, real-time collaborative document editor — think a minimal Google
 Early in development, documents were identified only by their display name. This meant two different users naming a document the same thing (e.g., both calling something "Notes") would collide — potentially granting one user access to the other's private content. The current design gives every document its own auto-incrementing ID at creation time, completely decoupled from its display name, with an `owner_id` marking who created it. All permissions and content are keyed by this ID, so name collisions are structurally impossible.
 
 ## Getting Started
+## How to run??
+## Visit ==> https://analytics-engine-1.onrender.com
 
+## or run locally by following these steps:
 ### Prerequisites
 - Python 3.10+
 - Docker & Docker Compose
