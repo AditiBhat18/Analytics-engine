@@ -39,6 +39,7 @@ Early in development, documents were identified only by their display name. This
 ## Getting Started
 ### How to run?
 ### Visit ==> https://analytics-engine-1.onrender.com
+### Note: The demo is hosted on Render's free tier, so the first request may take a few seconds to wake the server.
 
 or run locally by following these steps:
 
