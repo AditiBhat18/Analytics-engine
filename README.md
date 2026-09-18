@@ -37,6 +37,10 @@ A full-stack, real-time collaborative document editor — think a minimal Google
 Early in development, documents were identified only by their display name. This meant two different users naming a document the same thing (e.g., both calling something "Notes") would collide — potentially granting one user access to the other's private content. The current design gives every document its own auto-incrementing ID at creation time, completely decoupled from its display name, with an `owner_id` marking who created it. All permissions and content are keyed by this ID, so name collisions are structurally impossible.
 
 ## Getting Started
+### How to run?
+### Visit ==> https://analytics-engine-1.onrender.com
+
+or run locally by following these steps:
 
 ### Prerequisites
 - Python 3.10+
@@ -45,8 +49,8 @@ Early in development, documents were identified only by their display name. This
 
 ### 1. Clone the repo
 ```bash
-git clone https://github.com/<your-username>/<your-repo-name>.git
-cd <your-repo-name>
+git clone https://github.com/AditiBhat18/Analytics-engine.git
+cd Analytics-engine
 ```
 
 ### 2. Start the database
@@ -88,7 +92,3 @@ To test real-time multi-user collaboration: open a second tab (or an incognito/p
 - Rich text formatting instead of plain text
 - Document version history / rollback
 - Rate limiting on auth endpoints
-
-## License
-
-MIT — feel free to use this as a learning reference.
