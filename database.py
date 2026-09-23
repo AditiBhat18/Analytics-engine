@@ -24,6 +24,3 @@ def get_db():
     finally:
 <<<<<<< HEAD
         db.close()
-=======
-        db.close()
->>>>>>> 4abb119c0dd1b844709efd4535c6b079f2289813
