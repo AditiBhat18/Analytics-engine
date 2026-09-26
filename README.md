@@ -38,7 +38,7 @@ Early in development, documents were identified only by their display name. This
 
 ## Getting Started
 ### How to run?
-### Visit ==> https://analytics-engine-1.onrender.com
+### Visit ==> https://analytics-engine-opec.onrender.com
 ### Note: The demo is hosted on Render's free tier, so the first request may take a few seconds to wake the server.
 
 or run locally by following these steps:
@@ -62,7 +62,7 @@ docker-compose up -d
 
 ### 3. Install Python dependencies
 ```bash
-pip install fastapi uvicorn sqlalchemy psycopg2-binary "python-jose[cryptography]" pydantic "uvicorn[standard]"
+pip install fastapi "uvicorn[standard]" "sqlalchemy>=2.0,<2.1" psycopg2-binary "python-jose[cryptography]" pydantic email-validator
 ```
 
 ### 4. Run the app
@@ -75,18 +75,7 @@ Go to **http://localhost:8000** in your browser.
 
 To test real-time multi-user collaboration: open a second tab (or an incognito/private window) and log in as a different user — each tab keeps its own session independently, so you can watch both users edit the same shared document live.
 
-## API Overview
 
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/auth/register` | Create a new user account |
-| POST | `/api/auth/login` | Log in, returns a JWT |
-| GET | `/api/documents` | List documents you own or have been shared |
-| POST | `/api/documents` | Create a new document |
-| GET | `/api/documents/{doc_id}` | Get a document's current content and analytics |
-| DELETE | `/api/documents/{doc_id}` | Delete (if owner) or leave (if shared with you) |
-| POST | `/api/documents/share` | Share a document with another user by email |
-| WS | `/ws/{doc_id}` | Real-time text + analytics + presence channel for a document |
 
 ## Possible Future Improvements
 
