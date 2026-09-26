@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from models import AnalyticsEvent, Document, DocumentPermission, User
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.orm import Session
 
 # Database Initialization
@@ -41,16 +41,6 @@ app = FastAPI(
 )
 
 
-# ---------------------------------------------------------
-# IN-MEMORY DEBOUNCED SAVE BUFFER
-# ---------------------------------------------------------
-# Instead of writing to Postgres on every single keystroke, we keep the
-# latest unsaved text for each document in RAM (`pending_content`) and
-# broadcast it to peers immediately. The actual DB write is scheduled to
-# run DEBOUNCE_SECONDS after the last keystroke on that document; every
-# new keystroke cancels and reschedules that timer. The net effect: a user
-# typing continuously for 10 seconds still results in exactly ONE database
-# write instead of dozens, with zero change to what anyone sees in the UI.
 DEBOUNCE_SECONDS = 2
 
 pending_content: dict[int, str] = {}
@@ -64,9 +54,7 @@ async def _flush_document(doc_id: int) -> None:
     if content is None:
         return
 
-    # A short-lived session opened only for this save, not tied to any
-    # websocket connection's lifetime -- safe to run after a connection
-    # (and its request-scoped session) has already closed.
+   
     db = SessionLocal()
     try:
         document = db.query(Document).filter(Document.id == doc_id).first()
@@ -196,21 +184,47 @@ manager = ConnectionManager()
 
 
 # --- Pydantic Schemas ---
-class AuthSchema(BaseModel):
-    email: str
+class _BaseAuthSchema(BaseModel):
+    """
+    Shared email handling for login/register: EmailStr enforces a real
+    email format (must have an "@", a valid domain shape, etc.) instead of
+    accepting any non-blank string like "abcd". Whitespace is trimmed
+    before format-checking, and the result is lowercased so the same
+    address always matches regardless of how it was typed/cased.
+    """
+    email: EmailStr
     password: str
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def strip_email(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("email")
     @classmethod
-    def email_not_blank(cls, v):
-        v = v.strip()
-        if not v:
-            raise ValueError("Email is required")
+    def lowercase_email(cls, v):
         return v.lower()
 
+
+class RegisterSchema(_BaseAuthSchema):
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, v):
+        if not v:
+            raise ValueError("Password is required")
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long")
+        return v
+
+
+class LoginSchema(_BaseAuthSchema):
     @field_validator("password")
     @classmethod
     def password_not_blank(cls, v):
+        # Intentionally does NOT enforce a minimum length here: an account
+        # created before this validation existed may have a shorter
+        # password, and login must keep working for it. Only new
+        # registrations (RegisterSchema) are held to the length rule.
         if not v:
             raise ValueError("Password is required")
         return v
@@ -218,14 +232,16 @@ class AuthSchema(BaseModel):
 
 class ShareDocSchema(BaseModel):
     doc_id: int
-    target_user_email: str
+    target_user_email: EmailStr
+
+    @field_validator("target_user_email", mode="before")
+    @classmethod
+    def strip_target_email(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("target_user_email")
     @classmethod
-    def email_not_blank(cls, v):
-        v = v.strip()
-        if not v:
-            raise ValueError("Target email is required")
+    def lowercase_target_email(cls, v):
         return v.lower()
 
 
@@ -255,7 +271,7 @@ def get_ui():
 # AUTHENTICATION ENDPOINTS
 # ---------------------------------------------------------
 @app.post("/api/auth/register")
-def register(user_data: AuthSchema, db: Session = Depends(get_db)):
+def register(user_data: RegisterSchema, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.email == user_data.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -269,7 +285,7 @@ def register(user_data: AuthSchema, db: Session = Depends(get_db)):
 
 
 @app.post("/api/auth/login")
-def login(login_data: AuthSchema, db: Session = Depends(get_db)):
+def login(login_data: LoginSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == login_data.email).first()
     if not user:
         raise HTTPException(

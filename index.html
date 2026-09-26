@@ -184,6 +184,27 @@
             }
         }
 
+        // FastAPI's `detail` field is a plain string for most errors, but for
+        // Pydantic validation errors (422s) it's an ARRAY of objects like
+        // {msg: "...", loc: [...], type: "..."}. Treating it as a string in
+        // that case produces "[object Object],[object Object]" on screen.
+        // This pulls out the actual human-readable message either way.
+        function extractErrorMessage(data, fallback) {
+            const detail = data && data.detail;
+            if (!detail) return fallback;
+            if (typeof detail === "string") return detail;
+            if (Array.isArray(detail)) {
+                const messages = detail
+                    .map(item => (item && item.msg ? item.msg : null))
+                    .filter(Boolean)
+                    // Pydantic prefixes custom validator messages with
+                    // "Value error, " -- strip that internal-looking prefix.
+                    .map(msg => msg.replace(/^Value error,\s*/, ""));
+                if (messages.length) return messages.join("; ");
+            }
+            return fallback;
+        }
+
         let toastTimer = null;
         function showToast(message) {
             const toast = document.getElementById("toast");
@@ -234,7 +255,7 @@
                 const data = await res.json();
 
                 if (!res.ok) {
-                    throw new Error(data.detail || "Authentication failed");
+                    throw new Error(extractErrorMessage(data, "Authentication failed"));
                 }
 
                 if (isRegisterMode) {
@@ -332,7 +353,7 @@
                     await loadDocumentList();
                     selectDocument({ id: data.doc_id, name: data.doc_name, is_owner: true });
                 } else {
-                    showToast((data.detail && (data.detail[0]?.msg || data.detail)) || "Failed to create document");
+                    showToast(extractErrorMessage(data, "Failed to create document"));
                 }
             } catch (err) { showToast("Failed to create document"); }
         }
@@ -364,7 +385,7 @@
                     await loadDocumentList();
                     showToast(data.message || "Done");
                 } else {
-                    showToast(data.detail || "Action failed");
+                    showToast(extractErrorMessage(data, "Action failed"));
                 }
             } catch (err) { showToast("Action failed"); }
         }
@@ -406,7 +427,7 @@
                     body: JSON.stringify({ doc_id: currentDoc.id, target_user_email: targetEmail })
                 });
                 const data = await res.json();
-                showToast(res.ok ? data.message : data.detail);
+                showToast(res.ok ? data.message : extractErrorMessage(data, "Sharing failed."));
             } catch (err) { showToast("Sharing failed."); }
         }
 
