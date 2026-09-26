@@ -1,9 +1,10 @@
+import asyncio
 from datetime import datetime, timedelta
 import hashlib
 import hmac
 import os
 from typing import Optional
-from database import Base, engine, get_db
+from database import Base, engine, get_db, SessionLocal
 from fastapi import (
     Depends,
     FastAPI,
@@ -36,8 +37,65 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 app = FastAPI(
     title="Real-Time Collaborative Workspace with Auth & Permissions",
-    version="4.0",
+    version="5.0",
 )
+
+
+# ---------------------------------------------------------
+# IN-MEMORY DEBOUNCED SAVE BUFFER
+# ---------------------------------------------------------
+# Instead of writing to Postgres on every single keystroke, we keep the
+# latest unsaved text for each document in RAM (`pending_content`) and
+# broadcast it to peers immediately. The actual DB write is scheduled to
+# run DEBOUNCE_SECONDS after the last keystroke on that document; every
+# new keystroke cancels and reschedules that timer. The net effect: a user
+# typing continuously for 10 seconds still results in exactly ONE database
+# write instead of dozens, with zero change to what anyone sees in the UI.
+DEBOUNCE_SECONDS = 2
+
+pending_content: dict[int, str] = {}
+save_tasks: dict[int, asyncio.Task] = {}
+
+
+async def _flush_document(doc_id: int) -> None:
+    """Persist the buffered content for doc_id, if any is pending."""
+    content = pending_content.pop(doc_id, None)
+    save_tasks.pop(doc_id, None)
+    if content is None:
+        return
+
+    # A short-lived session opened only for this save, not tied to any
+    # websocket connection's lifetime -- safe to run after a connection
+    # (and its request-scoped session) has already closed.
+    db = SessionLocal()
+    try:
+        document = db.query(Document).filter(Document.id == doc_id).first()
+        if document is None:
+            # Document was deleted while an edit was still pending; nothing
+            # left to save it to.
+            return
+        document.content = content
+        db.add(AnalyticsEvent(document_id=doc_id, payload=content))
+        db.commit()
+    finally:
+        db.close()
+
+
+async def _debounced_flush(doc_id: int) -> None:
+    try:
+        await asyncio.sleep(DEBOUNCE_SECONDS)
+    except asyncio.CancelledError:
+        # A newer keystroke rescheduled this before it could fire; the
+        # newer task will handle saving the latest content instead.
+        return
+    await _flush_document(doc_id)
+
+
+def _schedule_flush(doc_id: int) -> None:
+    existing = save_tasks.get(doc_id)
+    if existing and not existing.done():
+        existing.cancel()
+    save_tasks[doc_id] = asyncio.create_task(_debounced_flush(doc_id))
 
 
 # --- Pure PBKDF2 Password Hashing ---
@@ -272,19 +330,19 @@ def create_document(
 
     # Every document gets its own unique id, regardless of what name is
     # chosen, so two different documents can never collide or overwrite
-    # each other just because they share a display name.
-    new_doc = Document(name=doc.doc_name, owner_id=user.id)
+    # each other just because they share a display name. Its initial
+    # content is stored directly on the row.
+    new_doc = Document(
+        name=doc.doc_name, owner_id=user.id, content=doc.content or ""
+    )
     db.add(new_doc)
     db.commit()
     db.refresh(new_doc)
 
     perm = DocumentPermission(document_id=new_doc.id, user_id=user.id)
     db.add(perm)
-
-    db_event = AnalyticsEvent(document_id=new_doc.id, payload=doc.content)
-    db.add(db_event)
-
     db.commit()
+
     return {
         "message": f"Document '{new_doc.name}' created",
         "doc_id": new_doc.id,
@@ -308,13 +366,10 @@ def get_document(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    event = (
-        db.query(AnalyticsEvent)
-        .filter(AnalyticsEvent.document_id == doc_id)
-        .order_by(AnalyticsEvent.id.desc())
-        .first()
-    )
-    content = event.payload if event else ""
+    # Prefer any not-yet-flushed in-memory content over what's on disk, so a
+    # reload always shows the very latest edits even mid-debounce-window --
+    # this is what keeps the user-visible behavior identical to before.
+    content = pending_content.get(doc_id, document.content or "")
     words = len(content.split()) if content else 0
     chars = len(content)
     lines = len(content.splitlines()) if content else 0
@@ -337,9 +392,8 @@ def delete_document(
     """
     Owners deleting their document removes it entirely, for everyone it was
     shared with. Non-owners "deleting" it only removes their OWN access
-    (i.e. they leave it) — it stays completely intact for the owner and
-    everyone else it's shared with. This is the fix for: "if B deletes a
-    file, only B's access should be removed, not affect others."
+    (i.e. they leave it) -- it stays completely intact for the owner and
+    everyone else it's shared with.
     """
     user = get_current_user_from_token(token, db)
 
@@ -361,6 +415,13 @@ def delete_document(
         ).delete()
         db.delete(document)
         db.commit()
+
+        # Drop any unsaved buffer/pending timer for this now-deleted document.
+        pending_content.pop(doc_id, None)
+        existing_task = save_tasks.pop(doc_id, None)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
         return {"message": f"Document '{document.name}' deleted for everyone"}
     else:
         db.query(DocumentPermission).filter(
@@ -454,13 +515,16 @@ async def websocket_endpoint(
             data = await websocket.receive_json()
             content = data.get("text", "")
 
+            # Update the in-memory buffer and broadcast to peers instantly --
+            # no DB write on this hot path. The actual persistence is
+            # scheduled for DEBOUNCE_SECONDS after the last keystroke on
+            # this document (see _schedule_flush at the top of this file).
+            pending_content[doc_id] = content
+            _schedule_flush(doc_id)
+
             words = len(content.split()) if content else 0
             chars = len(content)
             lines = len(content.splitlines()) if content else 0
-
-            db_event = AnalyticsEvent(document_id=doc_id, payload=content)
-            db.add(db_event)
-            db.commit()
 
             await manager.broadcast(
                 doc_id,
@@ -479,3 +543,11 @@ async def websocket_endpoint(
             {"type": "USER_COUNT", "count": manager.get_active_count(doc_id)},
             sender=None,
         )
+        # If nobody is left editing this document, don't wait out the full
+        # debounce window -- flush any unsaved edits immediately so closing
+        # the last open tab can never silently lose data.
+        if manager.get_active_count(doc_id) == 0:
+            existing_task = save_tasks.get(doc_id)
+            if existing_task and not existing_task.done():
+                existing_task.cancel()
+            await _flush_document(doc_id)

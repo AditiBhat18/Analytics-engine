@@ -13,17 +13,18 @@ class User(Base):
 class Document(Base):
     """
     A document is identified by its own auto-incrementing `id`, NOT by its
-    display `name`. This is what makes the owner concept and access control
-    actually safe: two different users can each name a document "Notes"
-    without colliding, because they get two different Document rows with
-    two different ids. `owner_id` records who created it and is the only
-    user allowed to delete it entirely.
+    display `name`, so two users can never collide by naming a document the
+    same thing. `owner_id` records who created it (only they can delete it
+    entirely). `content` holds the current text directly on this row, so
+    reading a document's content is a single fast lookup with no extra
+    query needed.
     """
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True, nullable=False)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content = Column(Text, nullable=False, default="")
 
 
 class DocumentPermission(Base):
@@ -44,9 +45,11 @@ class DocumentPermission(Base):
 
 class AnalyticsEvent(Base):
     """
-    Each edit is stored as a new event row (append-only log), keyed by the
-    document's real id. The most recent event for a document_id is treated
-    as its current content.
+    A coarse-grained edit-history log. Unlike before, this is NO LONGER
+    written on every keystroke — only once per debounced save (i.e. a
+    couple seconds after someone stops typing), so its row count stays
+    small. The authoritative current content lives on Document.content;
+    this table is purely a low-frequency history/audit trail.
     """
     __tablename__ = "analytics_events"
 
