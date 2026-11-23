@@ -1,81 +1,115 @@
-# Real-Time Collaborative Workspace
 
-A full-stack, real-time collaborative document editor — think a minimal Google Docs — built with **FastAPI**, **PostgreSQL**, and **native WebSockets**. Multiple users can edit the same document simultaneously and see each other's changes, live word/character/line counts, and active user presence update in real time, with no page refresh.
+# Analytics Engine — Real-Time Collaborative Workspace
 
+A full-stack collaborative document management application built with **FastAPI, PostgreSQL, and JavaScript**. It provides secure user authentication, document ownership, sharing permissions, and collaborative editing.
 
 ## Features
 
-- **Authentication** — Email/password registration and login using JWT bearer tokens, with PBKDF2-HMAC-SHA256 password hashing (salted, industry-standard, not a stored plaintext or reversible scheme).
-- **Real-time collaborative editing** — A WebSocket channel per document broadcasts every keystroke to all other connected clients editing that document, with live text sync.
-- **Live analytics** — Word count, character count, line count, and active user count update instantly for every connected user as anyone types — no polling, no refresh.
-- **Document ownership & sharing** — Every document has a real owner. Owners can share documents with other registered users by email. Shared users can view and edit but only the owner can permanently delete a document — non-owners can "leave" a shared document without affecting anyone else's access to it.
-- **Collision-safe document identity** — Documents are identified by a unique database ID, not by their display name, so two different users can name their documents identically without any risk of one overwriting or gaining access to the other's content.
-- **Dockerized database** — PostgreSQL runs in a container via Docker Compose for consistent, reproducible local setup.
+- **Authentication:** JWT-based authentication with secure password hashing.
+- **Document Management:** Create, access, edit, and delete documents.
+- **Access Control:** Document ownership and user-specific sharing permissions.
+- **Real-Time Collaboration:** WebSocket-based document synchronization and live analytics during local development.
+- **Live Analytics:** Word, character, line, and active-user counts.
+- **Collision-Safe Design:** Unique document IDs prevent conflicts between documents with identical names.
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
 | Backend | Python, FastAPI |
-| Real-time transport | WebSockets (native, via FastAPI/Starlette) |
 | Database | PostgreSQL |
 | ORM | SQLAlchemy |
-| Auth | JWT (python-jose), PBKDF2-HMAC password hashing |
-| Frontend | Vanilla HTML/CSS/JavaScript (no framework) |
-| Containerization | Docker Compose |
+| Authentication | JWT, PBKDF2-HMAC-SHA256 |
+| Real-Time Communication | WebSockets |
+| Frontend | HTML, CSS, JavaScript |
+| Local Database | Docker Compose |
+| Deployment | Vercel |
+| Hosted Database | Supabase |
 
-## Architecture Overview
+## Project Structure
 
-- **`main.py`** — FastAPI app: REST endpoints for auth and document CRUD, plus the WebSocket endpoint that manages real-time broadcast per document.
-- **`models.py`** — SQLAlchemy models: `User`, `Document` (with `owner_id`), `DocumentPermission` (join table granting per-user access to a document by its real ID), `AnalyticsEvent` (append-only log of document content snapshots, used to reconstruct current content and compute analytics).
-- **`database.py`** — SQLAlchemy engine/session setup.
-- **`index.html`** — Single-page frontend: login/register, document list sidebar, live-updating editor, and a WebSocket client that syncs text and analytics in real time.
-- **`docker-compose.yml`** — Spins up the PostgreSQL container the app connects to.
-
-### Why documents have their own ID instead of just a name
-
-Early in development, documents were identified only by their display name. This meant two different users naming a document the same thing (e.g., both calling something "Notes") would collide — potentially granting one user access to the other's private content. The current design gives every document its own auto-incrementing ID at creation time, completely decoupled from its display name, with an `owner_id` marking who created it. All permissions and content are keyed by this ID, so name collisions are structurally impossible.
+| File | Description |
+|---|---|
+| `main.py` | FastAPI application, API endpoints, authentication, and WebSocket handling |
+| `database.py` | Database engine and session configuration |
+| `models.py` | Relational database models |
+| `index.html` | Frontend interface and client-side functionality |
+| `docker-compose.yml` | Local PostgreSQL database configuration |
+| `requirements.txt` | Python dependencies |
 
 ## Getting Started
-### How to run?
 
-## Run locally by following these steps:
 ### Prerequisites
 - Python 3.10+
-- Docker & Docker Compose
-- pip
+- Docker Desktop with Docker Compose
+- Git
 
-### 1. Clone the repo
+### 1. Clone the repository
+
 ```bash
 git clone https://github.com/AditiBhat18/Analytics-engine.git
 cd Analytics-engine
 ```
 
-### 2. Start the database
-```bash
-docker-compose up -d
+### 2. Configure environment variables
+
+Create a `.env` file in the project root:
+
+```env
+DATABASE_URL=postgresql://supply_user:your_password@localhost:5432/analytics_engine
+SECRET_KEY=your_secure_secret_key
+
+POSTGRES_DB=analytics_engine
+POSTGRES_USER=supply_user
+POSTGRES_PASSWORD=your_password
 ```
 
-### 3. Install Python dependencies
+Use matching PostgreSQL credentials in your Docker Compose configuration. Keep `.env` private and never commit secrets.
+
+### 3. Start PostgreSQL
+
 ```bash
-pip install fastapi "uvicorn[standard]" "sqlalchemy>=2.0,<2.1" psycopg2-binary "python-jose[cryptography]" pydantic email-validator
+docker compose up -d
 ```
 
-### 4. Run the app
+### 4. Install dependencies
+
+```bash
+py -m venv .venv
+```
+
+Activate the environment and install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### 5. Start the application
+
 ```bash
 uvicorn main:app --reload
 ```
 
-### 5. Open it
-Go to **http://localhost:8000** in your browser.
+### 6. Open the application
 
-To test real-time multi-user collaboration: open a second tab (or an incognito/private window) and log in as a different user — each tab keeps its own session independently, so you can watch both users edit the same shared document live.
+Visit:
 
+`http://localhost:8000`
 
+For local collaboration testing, open the application in two browser sessions and access the same shared document.
 
-## Possible Future Improvements
+## Deployment
 
-- Operational-transform or CRDT-based merging for true concurrent multi-cursor editing (currently last-write-wins per keystroke broadcast)
-- Rich text formatting instead of plain text
-- Document version history / rollback
-- Rate limiting on auth endpoints
+- **Application:** Deployed on Vercel.
+- **Database:** Hosted on Supabase PostgreSQL.
+- **Configuration:** Deployment secrets and database credentials are managed through environment variables.
+
+Note: The current WebSocket implementation uses in-memory connection management and is intended for local development. Persistent real-time collaboration is not guaranteed in Vercel's serverless environment.
+
+## Future Improvements
+
+- Operational Transformation or CRDT-based concurrent editing.
+- Document version history and rollback.
+- Rich-text editing.
+- Persistent real-time collaboration across distributed instances.
+- Rate limiting and additional security protections.
