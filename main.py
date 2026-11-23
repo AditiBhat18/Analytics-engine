@@ -25,11 +25,12 @@ from sqlalchemy.orm import Session
 Base.metadata.create_all(bind=engine)
 
 # Security Configuration
-# Falls back to a default only for local/dev convenience. Set the SECRET_KEY
-# environment variable in any shared or production environment.
-SECRET_KEY = os.getenv(
-    "SECRET_KEY", "SUPER_SECRET_JWT_KEY_CHANGE_THIS_IN_PRODUCTION"
-)
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+
+if not SECRET_KEY or len(SECRET_KEY) < 32:
+    raise RuntimeError("A secure SECRET_KEY must be set in the .env file")
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 Hours
 
@@ -53,8 +54,6 @@ async def _flush_document(doc_id: int) -> None:
     save_tasks.pop(doc_id, None)
     if content is None:
         return
-
-   
     db = SessionLocal()
     try:
         document = db.query(Document).filter(Document.id == doc_id).first()
@@ -460,9 +459,11 @@ def share_document(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    if not check_doc_access(current_user.id, share_data.doc_id, db):
+    # Only the document owner can share it with another user.
+    if document.owner_id != current_user.id:
         raise HTTPException(
-            status_code=403, detail="You do not have permission to share this file"
+            status_code=403,
+            detail="Only the document owner can share this file",
         )
 
     if share_data.target_user_email == current_user.email:
